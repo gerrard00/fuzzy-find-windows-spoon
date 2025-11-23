@@ -14,6 +14,7 @@ local wfilter = require("hs.window.filter")
 local chooser = require("hs.chooser")
 local timer   = require("hs.timer")
 local hotkey  = require("hs.hotkey")
+local ax = require("hs.axuielement")
 
 ----------------------------------------------------------------------
 -- Internal state
@@ -41,6 +42,16 @@ obj.defaultHotkeys = {
 -- Helpers
 ----------------------------------------------------------------------
 
+local function isBrowserApp(app)
+    if not app then return false end
+    
+    local bid = app:bundleID()
+    
+    return bid == "com.apple.Safari"
+        or bid == "org.mozilla.firefox"
+        or bid == "com.google.Chrome"
+end
+
 local function shouldExcludeWindow(win, appName)
     if not win then return true end
 
@@ -58,7 +69,159 @@ local function shouldExcludeWindow(win, appName)
     return false
 end
 
-local function windowToMeta(win)
+-- Find tab group for Firefox/Safari (default browsers)
+local function findTabGroupDefault(element, depth, maxDepth)
+    if not element or depth > maxDepth then return nil end
+    
+    local role = element:attributeValue("AXRole")
+    if role == "AXTabGroup" then
+        return element
+    end
+    
+    local children = element:attributeValue("AXChildren")
+    if not children then return nil end
+    
+    for _, child in ipairs(children) do
+        local found = findTabGroupDefault(child, depth + 1, maxDepth)
+        if found then return found end
+    end
+    
+    return nil
+end
+
+-- Find tab button for Chrome, then return its parent group
+local function findChromeTabButton(element, depth, maxDepth)
+    if not element or depth > maxDepth then return nil end
+    
+    local role = element:attributeValue("AXRole")
+    local subrole = element:attributeValue("AXSubrole")
+    
+    -- Look for AXRadioButton with subrole AXTabButton
+    if role == "AXRadioButton" and subrole == "AXTabButton" then
+        print(string.format("[FuzzyFindWindows] Found Chrome tab button at depth %d", depth))
+        return element
+    end
+    
+    local children = element:attributeValue("AXChildren")
+    if not children then return nil end
+    
+    for _, child in ipairs(children) do
+        local found = findChromeTabButton(child, depth + 1, maxDepth)
+        if found then return found end
+    end
+    
+    return nil
+end
+
+-- Get tabs for Chrome
+function obj:_getTabsForChrome(win)
+    print(string.format("[FuzzyFindWindows] _getTabsForChrome: getting tabs for Chrome window"))
+    
+    local axWin = ax.windowElement(win)
+    if not axWin then
+        print("[FuzzyFindWindows] _getTabsForChrome: failed to get AX window element")
+        return {}
+    end
+    
+    -- Find a tab button (AXRadioButton with subrole AXTabButton)
+    print("[FuzzyFindWindows] _getTabsForChrome: searching for tab button (depth 1-12)")
+    local tabButton = findChromeTabButton(axWin, 1, 12)
+    if not tabButton then
+        print("[FuzzyFindWindows] _getTabsForChrome: tab button not found")
+        return {}
+    end
+    
+    -- Get the parent group
+    local tabGroup = tabButton:attributeValue("AXParent")
+    if not tabGroup then
+        print("[FuzzyFindWindows] _getTabsForChrome: tab button has no parent")
+        return {}
+    end
+    
+    print("[FuzzyFindWindows] _getTabsForChrome: found tab group, extracting tabs")
+    local tabs = {}
+    local children = tabGroup:attributeValue("AXChildren") or {}
+    print(string.format("[FuzzyFindWindows] _getTabsForChrome: tab group has %d children", #children))
+    
+    for i, child in ipairs(children) do
+        local childRole = child:attributeValue("AXRole")
+        local subrole = child:attributeValue("AXSubrole")
+        print(string.format("[FuzzyFindWindows] _getTabsForChrome: child %d has role %s, subrole %s", 
+            i, tostring(childRole), tostring(subrole)))
+        
+        -- Chrome tabs are AXRadioButton with subrole AXTabButton
+        if childRole == "AXRadioButton" and subrole == "AXTabButton" then
+            local title = child:attributeValue("AXDescription") or ""
+            if title ~= "" then
+                print(string.format("[FuzzyFindWindows] _getTabsForChrome: found tab with title: %s", title))
+                table.insert(tabs, {
+                    title = title,
+                    win   = win,
+                })
+            end
+        end
+    end
+    
+    print(string.format("[FuzzyFindWindows] _getTabsForChrome: returning %d tabs", #tabs))
+    return tabs
+end
+
+-- Get tabs for Firefox/Safari (default browsers)
+function obj:_getTabsForDefault(win)
+    local axWin = ax.windowElement(win)
+    if not axWin then
+        return {}
+    end
+    
+    -- Find AXTabGroup (depth 1-4)
+    local tabGroup = findTabGroupDefault(axWin, 1, 4)
+    if not tabGroup then
+        return {}
+    end
+    
+    local tabs = {}
+    local children = tabGroup:attributeValue("AXChildren") or {}
+    
+    for _, child in ipairs(children) do
+        local childRole = child:attributeValue("AXRole")
+        local roleDesc = child:attributeValue("AXRoleDescription")
+        
+        -- Firefox: AXTab or AXRadioButton with roleDesc="tab" uses AXTitle
+        if childRole == "AXTab" or (childRole == "AXRadioButton" and roleDesc == "tab") then
+            local title = child:attributeValue("AXTitle") or ""
+            if title ~= "" then
+                table.insert(tabs, {
+                    title = title,
+                    win   = win,
+                })
+            end
+        end
+    end
+    
+    return tabs
+end
+
+function obj:_getTabsForWindow(win)
+    local app = win:application()
+    if not app then
+        return {}
+    end
+    
+    local bundleID = app:bundleID() or ""
+    local isChrome = (bundleID == "com.google.Chrome")
+    
+    if not isBrowserApp(app) then
+        return {}
+    end
+    
+    if isChrome then
+        return self:_getTabsForChrome(win)
+    else
+        return self:_getTabsForDefault(win)
+    end
+end
+
+local function windowToMeta(win, selfObj)
     local app = win:application()
     if not app then return nil end
 
@@ -71,7 +234,7 @@ local function windowToMeta(win)
     if not winId then return nil end
     if shouldExcludeWindow(win, appName) then return nil end
 
-    return {
+    local meta = {
         id          = winId,
         title       = winTitle,
         appName     = appName,
@@ -79,6 +242,25 @@ local function windowToMeta(win)
         isMinimized = isMinimized,
         win         = win,  -- Cache the window object to avoid slow window.get(id) calls
     }
+    
+    -- Get tabs for browser windows
+    if selfObj and isBrowserApp(app) then
+        local isChrome = (bundleID == "com.google.Chrome")
+        if isChrome then
+            print(string.format("[FuzzyFindWindows] windowToMeta: getting tabs for browser window: %s", winTitle))
+        end
+        local tabsStartTime = timer.absoluteTime()
+        meta.tabs = selfObj:_getTabsForWindow(win)
+        local tabsElapsed = (timer.absoluteTime() - tabsStartTime) / 1e9
+        if isChrome then
+            print(string.format(
+                "[FuzzyFindWindows] windowToMeta: found %d tabs for window %s (took %.3f ms)",
+                #meta.tabs, winTitle, tabsElapsed * 1000
+            ))
+        end
+    end
+    
+    return meta
 end
 
 local function metaToChoice(meta)
@@ -96,8 +278,46 @@ end
 
 function obj:_rebuildChoicesFromIndex()
     local choices = {}
+    local totalTabs = 0
     for _, meta in pairs(self._indexById) do
+        -- Add window choice
         table.insert(choices, metaToChoice(meta))
+        
+        -- Add tab choices if tabs exist
+        if meta.tabs and #meta.tabs > 0 then
+            local isChrome = (meta.bundleID == "com.google.Chrome")
+            if isChrome then
+                print(string.format("[FuzzyFindWindows] _rebuildChoicesFromIndex: adding %d tabs for window %s", #meta.tabs, meta.title))
+            end
+            totalTabs = totalTabs + #meta.tabs
+            for _, tab in ipairs(meta.tabs) do
+                table.insert(choices, {
+                    text = tab.title or "[Untitled Tab]",
+                    subText = meta.appName .. " - Tab",
+                    id = meta.id,  -- Use parent window ID
+                    meta = {
+                        type = "tab",
+                        win = tab.win,  -- Use win from tab (parent hs.window)
+                        id = meta.id,
+                        tabTitle = tab.title,
+                        appName = meta.appName,
+                    }
+                })
+            end
+        end
+    end
+    -- Only log total if we have tabs (likely Chrome)
+    if totalTabs > 0 then
+        local isChrome = false
+        for _, meta in pairs(self._indexById) do
+            if meta.tabs and #meta.tabs > 0 and meta.bundleID == "com.google.Chrome" then
+                isChrome = true
+                break
+            end
+        end
+        if isChrome then
+            print(string.format("[FuzzyFindWindows] _rebuildChoicesFromIndex: created %d total choices (%d windows, %d tabs)", #choices, #choices - totalTabs, totalTabs))
+        end
     end
     table.sort(choices, function(a, b)
         return a.text:lower() < b.text:lower()
@@ -106,15 +326,13 @@ function obj:_rebuildChoicesFromIndex()
 end
 
 function obj:_addWindowToCache(win)
-    local meta = windowToMeta(win)
+    local meta = windowToMeta(win, self)
     if not meta then return end
 
     self._indexById[meta.id] = meta
 
-    table.insert(self._choices, metaToChoice(meta))
-    table.sort(self._choices, function(a, b)
-        return a.text:lower() < b.text:lower()
-    end)
+    -- Rebuild choices to include tabs
+    self:_rebuildChoicesFromIndex()
 
     if self._chooser and self._chooser:isVisible() then
         self._chooser:choices(self._choices)
@@ -126,12 +344,8 @@ function obj:_removeWindowFromCacheById(winId)
 
     self._indexById[winId] = nil
 
-    for i, choice in ipairs(self._choices) do
-        if choice.id == winId then
-            table.remove(self._choices, i)
-            break
-        end
-    end
+    -- Rebuild choices to remove all entries (window + tabs) for this window ID
+    self:_rebuildChoicesFromIndex()
 
     if self._chooser and self._chooser:isVisible() then
         self._chooser:choices(self._choices)
@@ -207,7 +421,7 @@ function obj:_fullRefresh()
 
     self._indexById = {}
     for _, win in ipairs(allWindows) do
-        local meta = windowToMeta(win)
+        local meta = windowToMeta(win, self)
         if meta then
             self._indexById[meta.id] = meta
         end
