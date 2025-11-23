@@ -15,6 +15,7 @@ local chooser = require("hs.chooser")
 local timer   = require("hs.timer")
 local hotkey  = require("hs.hotkey")
 local ax = require("hs.axuielement")
+local logger  = require("hs.logger").new("FuzzyFindWindows", "debug")
 
 ----------------------------------------------------------------------
 -- Internal state
@@ -31,7 +32,7 @@ obj._rescanInProgress = false
 obj._refreshHotkey    = nil
 obj._pendingQuery     = nil
 
-obj.windowFilter      = nil  -- hs.window.filter instance
+obj.windowFilter      = nil
 
 -- Default configuration
 obj.defaultHotkeys = {
@@ -70,14 +71,12 @@ local function shouldExcludeWindow(win, appName)
 end
 
 
--- Find tab button for Chrome, then return its parent group
-local function findChromeTabButton(element, depth, maxDepth)
+local function findTabButton(element, depth, maxDepth)
     if not element or depth > maxDepth then return nil end
     
     local role = element:attributeValue("AXRole")
     local subrole = element:attributeValue("AXSubrole")
     
-    -- Look for AXRadioButton with subrole AXTabButton
     if role == "AXRadioButton" and subrole == "AXTabButton" then
         return element
     end
@@ -86,27 +85,24 @@ local function findChromeTabButton(element, depth, maxDepth)
     if not children then return nil end
     
     for _, child in ipairs(children) do
-        local found = findChromeTabButton(child, depth + 1, maxDepth)
+        local found = findTabButton(child, depth + 1, maxDepth)
         if found then return found end
     end
     
     return nil
 end
 
--- Get tabs for all browsers (using Chrome method)
-function obj:_getTabsForChrome(win)
+function obj:_getTabsForBrowser(win)
     local axWin = ax.windowElement(win)
     if not axWin then
         return {}
     end
     
-    -- Find a tab button (AXRadioButton with subrole AXTabButton)
-    local tabButton = findChromeTabButton(axWin, 1, 12)
+    local tabButton = findTabButton(axWin, 1, 12)
     if not tabButton then
         return {}
     end
     
-    -- Get the parent group
     local tabGroup = tabButton:attributeValue("AXParent")
     if not tabGroup then
         return {}
@@ -119,14 +115,19 @@ function obj:_getTabsForChrome(win)
         local childRole = child:attributeValue("AXRole")
         local subrole = child:attributeValue("AXSubrole")
         
-        -- Chrome tabs are AXRadioButton with subrole AXTabButton
         if childRole == "AXRadioButton" and subrole == "AXTabButton" then
             local title = child:attributeValue("AXDescription") or ""
+            if title == "" then
+                title = child:attributeValue("AXTitle") or ""
+            end
+            
             if title ~= "" then
                 table.insert(tabs, {
                     title = title,
                     win   = win,
                 })
+            else
+                logger:w("_getTabsForBrowser: found tab button but title is empty")
             end
         end
     end
@@ -144,8 +145,7 @@ function obj:_getTabsForWindow(win)
         return {}
     end
     
-    -- Use Chrome flow for all browsers
-    return self:_getTabsForChrome(win)
+    return self:_getTabsForBrowser(win)
 end
 
 local function windowToMeta(win, selfObj)
@@ -167,10 +167,9 @@ local function windowToMeta(win, selfObj)
         appName     = appName,
         bundleID    = bundleID,
         isMinimized = isMinimized,
-        win         = win,  -- Cache the window object to avoid slow window.get(id) calls
+        win         = win,
     }
     
-    -- Get tabs for browser windows
     if selfObj and isBrowserApp(app) then
         meta.tabs = selfObj:_getTabsForWindow(win)
     end
@@ -195,20 +194,18 @@ function obj:_rebuildChoicesFromIndex()
     local choices = {}
     local totalTabs = 0
     for _, meta in pairs(self._indexById) do
-        -- Add window choice
         table.insert(choices, metaToChoice(meta))
         
-        -- Add tab choices if tabs exist
         if meta.tabs and #meta.tabs > 0 then
             totalTabs = totalTabs + #meta.tabs
             for _, tab in ipairs(meta.tabs) do
                 table.insert(choices, {
                     text = tab.title or "[Untitled Tab]",
                     subText = meta.appName .. " - Tab",
-                    id = meta.id,  -- Use parent window ID
+                    id = meta.id,
                     meta = {
                         type = "tab",
-                        win = tab.win,  -- Use win from tab (parent hs.window)
+                        win = tab.win,
                         id = meta.id,
                         tabTitle = tab.title,
                         appName = meta.appName,
@@ -229,7 +226,6 @@ function obj:_addWindowToCache(win)
 
     self._indexById[meta.id] = meta
 
-    -- Rebuild choices to include tabs
     self:_rebuildChoicesFromIndex()
 
     if self._chooser and self._chooser:isVisible() then
@@ -242,7 +238,6 @@ function obj:_removeWindowFromCacheById(winId)
 
     self._indexById[winId] = nil
 
-    -- Rebuild choices to remove all entries (window + tabs) for this window ID
     self:_rebuildChoicesFromIndex()
 
     if self._chooser and self._chooser:isVisible() then
@@ -255,7 +250,10 @@ end
 ----------------------------------------------------------------------
 
 function obj:_showRebuildMessage()
-    if not self._chooser then return end
+    if not self._chooser then 
+        logger:w("_showRebuildMessage: chooser is nil!")
+        return 
+    end
     self._chooser:choices({
         {
             text    = "Rebuilding index…",
@@ -286,7 +284,7 @@ function obj:_applyFilter(query)
 end
 
 ----------------------------------------------------------------------
--- Full refresh via window.filter (includes invisible windows)
+-- Full refresh
 ----------------------------------------------------------------------
 
 function obj:_ensureWindowFilter()
@@ -298,7 +296,10 @@ function obj:_ensureWindowFilter()
 end
 
 function obj:_fullRefresh()
-    if self._rescanInProgress then return end
+    if self._rescanInProgress then 
+        logger:w("_fullRefresh: rescan already in progress, returning early")
+        return 
+    end
     self._rescanInProgress = true
 
     self:_ensureWindowFilter()
@@ -372,7 +373,6 @@ function obj:_ensureChooser()
                 return
             end
 
-            -- Ignore the "Rebuilding index…" pseudo-row
             if not choice.id and (choice.text or ""):find("Rebuilding index", 1, true) then
                 return
             end
@@ -386,10 +386,8 @@ function obj:_ensureChooser()
                 return
             end
 
-            -- Try to use cached window object first (much faster than window.get)
             local win = nil
             
-            -- First try choice.meta.win (if available)
             if choice.meta and choice.meta.win then
                 local cachedId = choice.meta.win:id()
                 if cachedId == id then
@@ -397,11 +395,9 @@ function obj:_ensureChooser()
                 end
             end
             
-            -- Fallback to index cache
             if not win then
                 local cachedMeta = self._indexById[id]
                 if cachedMeta and cachedMeta.win then
-                    -- Validate cached window is still valid
                     local cachedId = cachedMeta.win:id()
                     if cachedId == id then
                         win = cachedMeta.win
@@ -409,16 +405,13 @@ function obj:_ensureChooser()
                 end
             end
             
-            -- Fallback to window.get if cache miss or invalid
             if not win then
                 win = window.get(id)
                 if win then
-                    -- Update cache with fresh window object
                     local cachedMeta = self._indexById[id]
                     if cachedMeta then
                         cachedMeta.win = win
                     end
-                    -- Also update choice.meta if it exists
                     if choice.meta then
                         choice.meta.win = win
                     end
@@ -432,7 +425,6 @@ function obj:_ensureChooser()
             local app = win:application()
             
             if app then
-                -- true: better behavior across Spaces + hidden apps  [oai_citation:2‡hammerspoon.org](https://www.hammerspoon.org/docs/hs.application.html?utm_source=chatgpt.com)
                 app:activate(true)
             end
 
@@ -452,11 +444,16 @@ function obj:_ensureChooser()
     if not self._refreshHotkey then
         self._refreshHotkey = hotkey.bind({ "ctrl" }, "r", function()
             if self._chooser and self._chooser:isVisible() then
-                if self._rescanInProgress then return end
+                if self._rescanInProgress then 
+                    logger:w("Ctrl-R: rescan already in progress, ignoring")
+                    return 
+                end
                 self:_showRebuildMessage()
                 timer.doAfter(0, function()
                     self:_fullRefresh()
                 end)
+            else
+                logger:w("Ctrl-R: chooser not visible or nil (chooser=" .. tostring(self._chooser) .. ", visible=" .. tostring(self._chooser and self._chooser:isVisible()) .. ")")
             end
         end)
     end
@@ -467,8 +464,6 @@ end
 ----------------------------------------------------------------------
 
 function obj:init()
-    -- Defer filter creation until needed, but you *could* eagerly do:
-    -- self:_ensureWindowFilter()
     return self
 end
 
