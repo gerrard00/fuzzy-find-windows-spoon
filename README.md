@@ -2,6 +2,7 @@
 
 A Hammerspoon spoon that allows you to search for windows by title across all spaces and screens using fuzzy matching.
 
+This is for personal use, so I haven't submitted it to the official registation as yet. 
 ## Features
 
 - **Fuzzy Search**: Search for windows by title with fuzzy matching
