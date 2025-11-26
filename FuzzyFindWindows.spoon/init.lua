@@ -16,7 +16,6 @@ local timer   = require("hs.timer")
 local hotkey  = require("hs.hotkey")
 local ax = require("hs.axuielement")
 local logger  = require("hs.logger").new("FuzzyFindWindows", "debug")
-local inspect = require("hs.inspect")
 
 ----------------------------------------------------------------------
 -- Internal state
@@ -34,6 +33,8 @@ obj._refreshHotkey    = nil
 obj._pendingQuery     = nil
 
 obj.windowFilter      = nil
+obj._lastSelectedKey  = nil
+obj._secondLastSelectedKey = nil
 
 -- Default configuration
 obj.defaultHotkeys = {
@@ -272,18 +273,59 @@ end
 -- Index + choices management
 ----------------------------------------------------------------------
 
+function obj:_getChoiceKey(choice)
+    if choice.meta and choice.meta.type == "tab" then
+        return tostring(choice.meta.id) .. ":" .. (choice.meta.tabTitle or "")
+    else
+        return tostring(choice.id or "")
+    end
+end
+
 function obj:_sortChoices(choices)
-    table.sort(choices, function(a, b)
+    -- Separate choices into three groups:
+    -- 1. Second-to-last selected (goes first)
+    -- 2. All others except last selected (sorted by score/name)
+    -- 3. Last selected (goes last)
+    local secondLastChoice = nil
+    local lastChoice = nil
+    local otherChoices = {}
+    
+    for _, choice in ipairs(choices) do
+        local key = self:_getChoiceKey(choice)
+        if self._secondLastSelectedKey and key == self._secondLastSelectedKey then
+            secondLastChoice = choice
+        elseif self._lastSelectedKey and key == self._lastSelectedKey then
+            lastChoice = choice
+        else
+            table.insert(otherChoices, choice)
+        end
+    end
+    
+    -- Sort other choices by score descending, then by name
+    table.sort(otherChoices, function(a, b)
         local scoreA = a.score or 0
         local scoreB = b.score or 0
         
-        -- Sort by score descending, then by name
         if scoreA ~= scoreB then
             return scoreA > scoreB
         end
         
         return a.text:lower() < b.text:lower()
     end)
+    
+    -- Rebuild choices list: [second-to-last] + [sorted others] + [last]
+    choices = {}
+    if secondLastChoice then
+        table.insert(choices, secondLastChoice)
+    end
+    for _, choice in ipairs(otherChoices) do
+        table.insert(choices, choice)
+    end
+    if lastChoice then
+        table.insert(choices, lastChoice)
+    end
+    
+    return choices
 end
 
 function obj:_rebuildChoicesFromIndex()
@@ -315,9 +357,8 @@ function obj:_rebuildChoicesFromIndex()
         end
     end
     
-    self:_sortChoices(choices)
+    choices = self:_sortChoices(choices)
     self._choices = choices
-    logger:d("_rebuildChoicesFromIndex: choices updated\n" .. inspect(self._choices))
 end
 
 function obj:_addWindowToCache(win)
@@ -325,7 +366,6 @@ function obj:_addWindowToCache(win)
     if not meta then return end
 
     self._indexById[meta.id] = meta
-    logger:d("_addWindowToCache: index updated\n" .. inspect(self._indexById))
 
     self:_rebuildChoicesFromIndex()
 
@@ -338,7 +378,6 @@ function obj:_removeWindowFromCacheById(winId)
     if not winId then return end
 
     self._indexById[winId] = nil
-    logger:d("_removeWindowFromCacheById: index updated\n" .. inspect(self._indexById))
 
     self:_rebuildChoicesFromIndex()
 
@@ -421,7 +460,6 @@ function obj:_fullRefresh()
             self._indexById[meta.id] = meta
         end
     end
-    logger:d("_fullRefresh: index updated\n" .. inspect(self._indexById))
 
     self:_rebuildChoicesFromIndex()
     self._cacheBuilt       = true
@@ -525,19 +563,27 @@ function obj:_ensureChooser()
                 return
             end
 
+            -- Get the choice key for tracking
+            local choiceKey = self:_getChoiceKey(choice)
+            
+            -- Update selection tracking
+            if choiceKey ~= self._lastSelectedKey then
+                -- Move current last to second-to-last, new selection becomes last
+                self._secondLastSelectedKey = self._lastSelectedKey
+                self._lastSelectedKey = choiceKey
+            end
+            
             -- Increment score for this choice
             if choice.meta and choice.meta.type == "tab" then
                 -- Increment score on the tab object
                 if choice.meta.tab then
                     choice.meta.tab.score = (choice.meta.tab.score or 0) + 1
-                    logger:d("Chooser callback: score incremented for tab: " .. (choice.meta.tabTitle or "") .. ", new score: " .. choice.meta.tab.score)
                 end
             else
                 -- Increment score on the window meta object
                 local cachedMeta = self._indexById[id]
                 if cachedMeta then
                     cachedMeta.score = (cachedMeta.score or 0) + 1
-                    logger:d("Chooser callback: score incremented for window: " .. (cachedMeta.title or "") .. ", new score: " .. cachedMeta.score)
                 end
             end
             
@@ -686,6 +732,8 @@ function obj:stop()
     self._cacheBuilt       = false
     self._indexById        = {}
     self._choices          = {}
+    self._lastSelectedKey  = nil
+    self._secondLastSelectedKey = nil
 
     return self
 end
