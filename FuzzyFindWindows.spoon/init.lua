@@ -16,6 +16,7 @@ local timer   = require("hs.timer")
 local hotkey  = require("hs.hotkey")
 local ax = require("hs.axuielement")
 local logger  = require("hs.logger").new("FuzzyFindWindows", "debug")
+local inspect = require("hs.inspect")
 
 ----------------------------------------------------------------------
 -- Internal state
@@ -125,6 +126,7 @@ function obj:_getTabsForBrowser(win)
                 table.insert(tabs, {
                     title = title,
                     win   = win,
+                    score = 0,
                 })
             else
                 logger:w("_getTabsForBrowser: found tab button but title is empty")
@@ -214,6 +216,10 @@ local function windowToMeta(win, selfObj)
     if not winId then return nil end
     if shouldExcludeWindow(win, appName) then return nil end
 
+    -- Preserve existing score if meta already exists
+    local existingMeta = selfObj and selfObj._indexById[winId]
+    local existingScore = existingMeta and existingMeta.score or 0
+
     local meta = {
         id          = winId,
         title       = winTitle,
@@ -221,10 +227,33 @@ local function windowToMeta(win, selfObj)
         bundleID    = bundleID,
         isMinimized = isMinimized,
         win         = win,
+        score       = existingScore,
     }
     
     if selfObj and isBrowserApp(app) then
         meta.tabs = selfObj:_getTabsForWindow(win)
+        -- Preserve scores for existing tabs
+        if existingMeta and existingMeta.tabs then
+            local tabScoresByTitle = {}
+            for _, existingTab in ipairs(existingMeta.tabs) do
+                if existingTab.title and existingTab.score then
+                    tabScoresByTitle[existingTab.title] = existingTab.score
+                end
+            end
+            -- Apply preserved scores to new tabs
+            for _, tab in ipairs(meta.tabs) do
+                if tab.title and tabScoresByTitle[tab.title] then
+                    tab.score = tabScoresByTitle[tab.title]
+                else
+                    tab.score = 0
+                end
+            end
+        else
+            -- Initialize scores for new tabs
+            for _, tab in ipairs(meta.tabs) do
+                tab.score = 0
+            end
+        end
     end
     
     return meta
@@ -243,34 +272,52 @@ end
 -- Index + choices management
 ----------------------------------------------------------------------
 
+function obj:_sortChoices(choices)
+    table.sort(choices, function(a, b)
+        local scoreA = a.score or 0
+        local scoreB = b.score or 0
+        
+        -- Sort by score descending, then by name
+        if scoreA ~= scoreB then
+            return scoreA > scoreB
+        end
+        
+        return a.text:lower() < b.text:lower()
+    end)
+end
+
 function obj:_rebuildChoicesFromIndex()
     local choices = {}
-    local totalTabs = 0
     for _, meta in pairs(self._indexById) do
-        table.insert(choices, metaToChoice(meta))
+        local choice = metaToChoice(meta)
+        choice.score = meta.score or 0
+        table.insert(choices, choice)
         
         if meta.tabs and #meta.tabs > 0 then
-            totalTabs = totalTabs + #meta.tabs
             for _, tab in ipairs(meta.tabs) do
-                table.insert(choices, {
-                    text = tab.title or "[Untitled Tab]",
+                local tabTitle = tab.title or "[Untitled Tab]"
+                local choice = {
+                    text = tabTitle,
                     subText = meta.appName .. " - Tab",
                     id = meta.id,
+                    score = tab.score or 0,
                     meta = {
                         type = "tab",
                         win = tab.win,
                         id = meta.id,
                         tabTitle = tab.title,
                         appName = meta.appName,
+                        tab = tab,  -- Reference to the tab object for score updates
                     }
-                })
+                }
+                table.insert(choices, choice)
             end
         end
     end
-    table.sort(choices, function(a, b)
-        return a.text:lower() < b.text:lower()
-    end)
+    
+    self:_sortChoices(choices)
     self._choices = choices
+    logger:d("_rebuildChoicesFromIndex: choices updated\n" .. inspect(self._choices))
 end
 
 function obj:_addWindowToCache(win)
@@ -278,6 +325,7 @@ function obj:_addWindowToCache(win)
     if not meta then return end
 
     self._indexById[meta.id] = meta
+    logger:d("_addWindowToCache: index updated\n" .. inspect(self._indexById))
 
     self:_rebuildChoicesFromIndex()
 
@@ -290,6 +338,7 @@ function obj:_removeWindowFromCacheById(winId)
     if not winId then return end
 
     self._indexById[winId] = nil
+    logger:d("_removeWindowFromCacheById: index updated\n" .. inspect(self._indexById))
 
     self:_rebuildChoicesFromIndex()
 
@@ -372,6 +421,7 @@ function obj:_fullRefresh()
             self._indexById[meta.id] = meta
         end
     end
+    logger:d("_fullRefresh: index updated\n" .. inspect(self._indexById))
 
     self:_rebuildChoicesFromIndex()
     self._cacheBuilt       = true
@@ -473,6 +523,29 @@ function obj:_ensureChooser()
             
             if not win then
                 return
+            end
+
+            -- Increment score for this choice
+            if choice.meta and choice.meta.type == "tab" then
+                -- Increment score on the tab object
+                if choice.meta.tab then
+                    choice.meta.tab.score = (choice.meta.tab.score or 0) + 1
+                    logger:d("Chooser callback: score incremented for tab: " .. (choice.meta.tabTitle or "") .. ", new score: " .. choice.meta.tab.score)
+                end
+            else
+                -- Increment score on the window meta object
+                local cachedMeta = self._indexById[id]
+                if cachedMeta then
+                    cachedMeta.score = (cachedMeta.score or 0) + 1
+                    logger:d("Chooser callback: score incremented for window: " .. (cachedMeta.title or "") .. ", new score: " .. cachedMeta.score)
+                end
+            end
+            
+            -- Rebuild and sort choices
+            self:_rebuildChoicesFromIndex()
+            if self._chooser and self._chooser:isVisible() then
+                local q = self._chooser:query() or ""
+                self:_applyFilter(q)
             end
 
             -- Check if this is a tab selection
