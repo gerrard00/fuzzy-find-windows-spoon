@@ -24,10 +24,24 @@ local function loadModule(name)
     return require(name)
 end
 
+-- Configuration: choose filter implementation
+-- Set to "filter" for simple string matching, or "filter_fuzzy" for fzy-lua fuzzy matching
+-- local FILTER_TYPE = "filter"  -- Change to "filter_fuzzy" to use fzy-lua
+local FILTER_TYPE = "filter_fuzzy"
+
 -- Load modules
+local logger = require("hs.logger").new("FuzzyFindWindows", "debug")
+logger:d("Loading filter module: " .. FILTER_TYPE)
+
 local browser = loadModule("browser")
 local cache   = loadModule("cache")
-local filter  = loadModule("filter")
+local filter  = loadModule(FILTER_TYPE)
+
+if filter then
+    logger:d("Successfully loaded filter module: " .. FILTER_TYPE)
+else
+    logger:e("Failed to load filter module: " .. FILTER_TYPE)
+end
 local watcher = loadModule("watcher")
 local refresh = loadModule("refresh")
 local chooser = loadModule("chooser")
@@ -50,6 +64,7 @@ obj._pendingQuery     = nil
 obj.windowFilter      = nil
 obj._lastSelectedKey  = nil
 obj._secondLastSelectedKey = nil
+obj._filterModule     = filter  -- Store filter module reference for other modules
 
 -- Default configuration
 obj.defaultHotkeys = {

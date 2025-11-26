@@ -15,12 +15,18 @@ local function loadModule(name)
     return require(name)
 end
 
-local filter = loadModule("filter")
 local cache = loadModule("cache")
 local refresh = loadModule("refresh")
 local browser = loadModule("browser")
 
 function M.ensureChooser(self)
+    -- Use the filter module from init.lua, or fall back to loading "filter"
+    local filter = self._filterModule or loadModule("filter")
+    if not filter then
+        logger:e("ensureChooser: Failed to get filter module!")
+        return
+    end
+    logger:d("ensureChooser: Using filter module: " .. (self._filterModule and "from init.lua" or "fallback 'filter'"))
     if not self._chooser then
         self._chooser = chooser.new(function(choice)
             if not choice then

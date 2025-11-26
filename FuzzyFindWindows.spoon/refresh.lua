@@ -11,9 +11,15 @@ end
 
 local helpers = loadModule("helpers")
 local watcher = loadModule("watcher")
-local filter = loadModule("filter")
 
 function M.fullRefresh(self)
+    -- Use the filter module from init.lua, or fall back to loading "filter"
+    local filter = self._filterModule or loadModule("filter")
+    if not filter then
+        local logger = require("hs.logger").new("FuzzyFindWindows", "debug")
+        logger:e("fullRefresh: Failed to get filter module!")
+        return
+    end
     if self._rescanInProgress then 
         local logger = require("hs.logger").new("FuzzyFindWindows", "debug")
         logger:w("_fullRefresh: rescan already in progress, returning early")
