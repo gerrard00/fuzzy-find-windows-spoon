@@ -17,8 +17,6 @@ end
 local fzy = loadModule("fzy_lua")
 if not fzy then
     logger:e("filter_fuzzy: Failed to load fzy_lua module!")
-else
-    logger:d("filter_fuzzy: Successfully loaded fzy_lua module")
 end
 
 function M.showRebuildMessage(self)
@@ -42,16 +40,11 @@ function M.applyFilter(self, query)
     end
 
     local q = query or ""
-    logger:d("applyFilter: called with query='" .. q .. "'")
     
     if q == "" then
-        logger:d("applyFilter: empty query, showing all " .. #self._choices .. " choices")
         self._chooser:choices(self._choices)
         return
     end
-
-    local numChoices = #self._choices
-    logger:d("applyFilter: filtering " .. numChoices .. " choices")
 
     -- Build haystack array from choices (combine text and subText for better matching)
     local haystacks = {}
@@ -64,13 +57,6 @@ function M.applyFilter(self, query)
             searchableText = text .. " " .. subText
         end
         table.insert(haystacks, searchableText)
-        if i <= 3 then
-            logger:d("applyFilter: haystack[" .. i .. "] = '" .. searchableText .. "'")
-        end
-    end
-    
-    if numChoices > 3 then
-        logger:d("applyFilter: ... and " .. (numChoices - 3) .. " more haystacks")
     end
 
     -- Use fzy.filter to get matches with scores
@@ -79,20 +65,9 @@ function M.applyFilter(self, query)
         return
     end
     
-    logger:d("applyFilter: calling fzy.filter with needle='" .. q .. "' and " .. #haystacks .. " haystacks")
     local results = fzy.filter(q, haystacks)
-    logger:d("applyFilter: fzy.filter returned " .. #results .. " matches")
 
-    if #results > 0 then
-        logger:d("applyFilter: sample results (first 3):")
-        for i = 1, math.min(3, #results) do
-            local result = results[i]
-            local idx = result[1]
-            local positions = result[2]
-            local score = result[3]
-            logger:d("  [" .. i .. "] idx=" .. idx .. ", score=" .. tostring(score) .. ", positions=" .. table.concat(positions, ","))
-        end
-    else
+    if #results == 0 then
         logger:w("applyFilter: fzy.filter returned no matches for query='" .. q .. "'")
     end
 
@@ -113,7 +88,6 @@ function M.applyFilter(self, query)
         end
     end
 
-    logger:d("applyFilter: returning " .. #filtered .. " filtered choices")
     self._chooser:choices(filtered)
 end
 
